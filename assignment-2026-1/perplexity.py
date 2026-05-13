@@ -1,3 +1,8 @@
+# ==========================================================
+# Εργασία Αλγορίθμων 2026 
+# Όνομα: Γιουτζίν Τσάτσα (Juxhin Caca)
+# ΑΜ: 8150141
+# ==========================================================
 import argparse
 import sys
 import torch
@@ -37,12 +42,12 @@ def main():
         print(f"Error: Το αρχείο '{args.input_file}' δεν βρέθηκε.")
         sys.exit(1)
 
-    print("Tokenizing text...")
+    print("Μετατροπή κειμένου σε tokens...")
     encodings = tokenizer(text, return_tensors="pt")
     input_ids = encodings.input_ids.to(device)
     
     total_len = input_ids.size(1)
-    print(f"Found {total_len} tokens.")
+    print(f"Συνολικά βρέθηκαν {total_len} tokens προς ανάλυση.")
 
     # --- Υπολογισμός Sliding Window ---
     n_ctx = args.n_ctx
