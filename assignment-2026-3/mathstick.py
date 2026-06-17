@@ -75,11 +75,6 @@ def main():
 
         def dfs(slot_idx, current_picks, current_places):
             global_stats["visited"] += 1
-            
-            # Κλάδεμα (Pruning) αν ξεπεράσουμε το budget των κινήσεων
-            if len(current_picks) > max_k or len(current_places) > max_k:
-                global_stats["pruned"] += 1
-                return
 
             # Φτάσαμε σε φύλλο (έχουμε επιλέξει ψηφία για όλα τα slots)
             if slot_idx == num_slots:
@@ -138,12 +133,24 @@ def main():
                 slot_picks = [f"{letter}{s}" for s in init_segs if s not in target_segs]
                 slot_places = [f"{letter}{s}" for s in target_segs if s not in init_segs]
                 
-                chosen_digits.append(d)
-                dfs(slot_idx + 1, current_picks + slot_picks, current_places + slot_places)
-                chosen_digits.pop()
+                next_picks = current_picks + slot_picks
+                next_places = current_places + slot_places
+                
+                # LOOK-AHEAD PRUNING: Έλεγχος ΠΡΙΝ την αναδρομική κλήση
+                if len(next_picks) <= max_k and len(next_places) <= max_k:
+                    chosen_digits.append(d)
+                    dfs(slot_idx + 1, next_picks, next_places)
+                    chosen_digits.pop()
+                else:
+                    # Αν οι κινήσεις ξεπερνούν το όριο, το κλαδεύουμε άμεσα
+                    global_stats["pruned"] += 1
 
         chosen_digits = []
-        dfs(0, base_picks, base_places)
+        # Ξεκινάμε την αναζήτηση μόνο αν η αρχική κατάσταση του τελεστή δεν παραβιάζει το max_k
+        if len(base_picks) <= max_k and len(base_places) <= max_k:
+            dfs(0, base_picks, base_places)
+        else:
+            global_stats["pruned"] += 1
 
     # Τελική δομή εξόδου
     output_data = {
