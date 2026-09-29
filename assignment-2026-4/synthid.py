@@ -19,19 +19,16 @@ from toolkit import context_item, g_value, bloom_hash_positions
 # ==========================================================
 
 def sample_layered(p, g, m):
-    # Υπολογισμός της layered κατανομής για m επίπεδα
     current_p = list(p)
     num_tokens = len(current_p)
 
     for layer in range(m):
-        # Υπολογίζω το άθροισμα qA για τα στοιχεία με g=0
         q_A = 0.0
         for i in range(num_tokens):
             g_val = g(i, layer) if callable(g) else g[layer][i]
             if g_val == 0:
                 q_A += current_p[i]
 
-        # Ενημερώνω τις πιθανότητες για το επόμενο επίπεδο
         for i in range(num_tokens):
             g_val = g(i, layer) if callable(g) else g[layer][i]
             if g_val == 0:
@@ -39,23 +36,19 @@ def sample_layered(p, g, m):
             else:
                 current_p[i] = current_p[i] * (q_A + 1.0)
 
-        # Έλεγχος ανοχής αθροίσματος (πρέπει να ισούται με 1)
         tolerance = max(1e-9, (2 ** m) * 1e-15)
         assert abs(sum(current_p) - 1.0) < tolerance, "Σφάλμα: Το άθροισμα διαφέρει από το 1"
 
     return current_p
 
 def sample_knockout(p, g, m, rng):
-    # Διεξαγωγή τουρνουά knockout 2^m υποψηφίων
     num_candidates = 1 << m
     candidates = []
     
-    # Κληρώνω 2^m υποψηφίους από την αρχική κατανομή
     for _ in range(num_candidates):
         idx = toolkit.choose(p, rng.random())
         candidates.append(idx)
     
-    # Γύροι τουρνουά
     for layer in range(m):
         next_round = []
         for i in range(0, len(candidates), 2):
@@ -65,7 +58,6 @@ def sample_knockout(p, g, m, rng):
             g_left = g(left, layer) if callable(g) else g[layer][left]
             g_right = g(right, layer) if callable(g) else g[layer][right]
             
-            # Σε ισοπαλία (g_left == g_right), προκρίνεται ο αριστερός
             if g_left >= g_right:
                 next_round.append(left)
             else:
@@ -75,7 +67,6 @@ def sample_knockout(p, g, m, rng):
     return candidates[0]
 
 def generate(*pos_args, **kwargs):
-    # Διαχείριση παραμέτρων (είτε από CLI είτε ως arguments)
     if pos_args and hasattr(pos_args[0], 'key'):
         a = pos_args[0]
         key = a.key
@@ -101,13 +92,11 @@ def generate(*pos_args, **kwargs):
     
     tokens = []
     
-    # Δημιουργία αρχικού prompt
     prompt_len = min(window, length)
     for _ in range(prompt_len):
         token_idx = rng.randrange(toolkit.VOCAB_SIZE)
         tokens.append(toolkit.TOKENS[token_idx])
         
-    # Παραγωγή των υπολοίπων tokens
     while len(tokens) < length:
         current_window = tokens[-window:]
         dist = model.distribution(current_window)
@@ -140,31 +129,79 @@ def generate(*pos_args, **kwargs):
     }
 
 # ==========================================================
-# ΤΜΗΜΑ Β & Γ: Σκελετοί (Placeholders για επόμενο commit)
+# ΤΜΗΜΑ Β: Βαθμολόγηση (Scoring) & Φίλτρο Bloom
 # ==========================================================
 
 def scored_positions(tokens, h):
-    raise NotImplementedError
+    # Εντοπισμός μοναδικών θέσεων συμφραζομένων που μπορούν να βαθμολογηθούν
+    seen = set()
+    scorable = set()
+    for t in range(h, len(tokens)):
+        ctx = context_item(tokens[t-h:t])
+        if ctx not in seen:
+            seen.add(ctx)
+            scorable.add(t)
+    return scorable
 
 def score_numerator(tokens, key, h, m):
-    raise NotImplementedError
+    # Υπολογισμός αριθμητή σκόρ για τις έγκυρες θέσεις
+    pos = scored_positions(tokens, h)
+    total = 0
+    for t in pos:
+        ctx = tokens[t-h:t]
+        tok = tokens[t]
+        for layer in range(m):
+            total += g_value(key, ctx, layer, tok)
+    return total
 
 def mean_score(tokens, key, h, m):
-    raise NotImplementedError
+    # Υπολογισμός μέσου όρου σκόρ
+    pos = scored_positions(tokens, h)
+    if not pos:
+        return 0.0
+    num = score_numerator(tokens, key, h, m)
+    return num / (m * len(pos))
 
 class BloomFilter:
     def __init__(self, nbits, k):
         self.nbits = nbits
         self.k = k
+        self.bits = bytearray((nbits + 7) // 8)
 
     def add(self, item):
-        raise NotImplementedError
+        bit_positions = bloom_hash_positions(item, self.nbits, self.k)
+        for bit in bit_positions:
+            self.bits[bit >> 3] |= (1 << (bit & 7))
 
     def contains(self, item):
-        raise NotImplementedError
+        bit_positions = bloom_hash_positions(item, self.nbits, self.k)
+        return all((self.bits[bit >> 3] & (1 << (bit & 7))) != 0 for bit in bit_positions)
 
 def bloom_scored_positions(tokens, h, nbits, k):
-    raise NotImplementedError
+    # Υπολογισμός βαθμολογήσιμων θέσεων με χρήση φίλτρου Bloom και μέτρηση false skips
+    exact_seen = set()
+    bloom = BloomFilter(nbits, k)
+    scorable = set()
+    false_skips = 0
+
+    for t in range(h, len(tokens)):
+        ctx = context_item(tokens[t-h:t])
+        exact_has = (ctx in exact_seen)
+        bloom_has = bloom.contains(ctx)
+
+        if not bloom_has:
+            scorable.add(t)
+            bloom.add(ctx)
+            exact_seen.add(ctx)
+        else:
+            if not exact_has:
+                false_skips += 1
+
+    return scorable, false_skips
+
+# ==========================================================
+# ΤΜΗΜΑ Γ: Σκελετοί (Placeholders για ανίχνευση)
+# ==========================================================
 
 def histogram(numerators, length, m):
     raise NotImplementedError
@@ -177,4 +214,3 @@ def detect(*args, **kwargs):
 
 if __name__ == "__main__":
     toolkit.run(generate, detect)
-    
