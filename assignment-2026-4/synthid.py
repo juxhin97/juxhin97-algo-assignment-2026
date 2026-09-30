@@ -14,6 +14,21 @@ import hashlib
 import toolkit
 from toolkit import context_item, g_value, bloom_hash_positions
 
+# Ασφαλής μετατροπή δομών σε hashable για αποτροπή TypeError
+def make_hashable(obj):
+    if isinstance(obj, (list, tuple)):
+        return tuple(make_hashable(x) for x in obj)
+    if isinstance(obj, (set, frozenset)):
+        try:
+            return tuple(sorted(make_hashable(x) for x in obj))
+        except Exception:
+            return tuple(sorted(str(make_hashable(x)) for x in obj))
+    try:
+        hash(obj)
+        return obj
+    except Exception:
+        return str(obj)
+
 # ==========================================================
 # ΤΜΗΜΑ Α: Δειγματοληψία (Samplers) & Παραγωγή Κειμένου
 # ==========================================================
@@ -133,18 +148,18 @@ def generate(*pos_args, **kwargs):
 # ==========================================================
 
 def scored_positions(tokens, h):
-    # Εντοπισμός μοναδικών θέσεων συμφραζομένων που μπορούν να βαθμολογηθούν
     seen = set()
     scorable = set()
+    if not tokens or len(tokens) < h:
+        return scorable
     for t in range(h, len(tokens)):
-        ctx = context_item(tokens[t-h:t])
+        ctx = make_hashable(context_item(tokens[t-h:t]))
         if ctx not in seen:
             seen.add(ctx)
             scorable.add(t)
     return scorable
 
 def score_numerator(tokens, key, h, m):
-    # Υπολογισμός αριθμητή σκόρ για τις έγκυρες θέσεις
     pos = scored_positions(tokens, h)
     total = 0
     for t in pos:
@@ -155,7 +170,6 @@ def score_numerator(tokens, key, h, m):
     return total
 
 def mean_score(tokens, key, h, m):
-    # Υπολογισμός μέσου όρου σκόρ
     pos = scored_positions(tokens, h)
     if not pos:
         return 0.0
@@ -169,29 +183,34 @@ class BloomFilter:
         self.bits = bytearray((nbits + 7) // 8)
 
     def add(self, item):
-        bit_positions = bloom_hash_positions(item, self.nbits, self.k)
+        item_str = str(make_hashable(item))
+        bit_positions = bloom_hash_positions(item_str, self.nbits, self.k)
         for bit in bit_positions:
             self.bits[bit >> 3] |= (1 << (bit & 7))
 
     def contains(self, item):
-        bit_positions = bloom_hash_positions(item, self.nbits, self.k)
+        item_str = str(make_hashable(item))
+        bit_positions = bloom_hash_positions(item_str, self.nbits, self.k)
         return all((self.bits[bit >> 3] & (1 << (bit & 7))) != 0 for bit in bit_positions)
 
 def bloom_scored_positions(tokens, h, nbits, k):
-    # Υπολογισμός βαθμολογήσιμων θέσεων με χρήση φίλτρου Bloom και μέτρηση false skips
     exact_seen = set()
     bloom = BloomFilter(nbits, k)
     scorable = set()
     false_skips = 0
 
+    if not tokens or len(tokens) < h:
+        return scorable, false_skips
+
     for t in range(h, len(tokens)):
-        ctx = context_item(tokens[t-h:t])
+        raw_ctx = context_item(tokens[t-h:t])
+        ctx = make_hashable(raw_ctx)
         exact_has = (ctx in exact_seen)
-        bloom_has = bloom.contains(ctx)
+        bloom_has = bloom.contains(raw_ctx)
 
         if not bloom_has:
             scorable.add(t)
-            bloom.add(ctx)
+            bloom.add(raw_ctx)
             exact_seen.add(ctx)
         else:
             if not exact_has:
@@ -200,17 +219,146 @@ def bloom_scored_positions(tokens, h, nbits, k):
     return scorable, false_skips
 
 # ==========================================================
-# ΤΜΗΜΑ Γ: Σκελετοί (Placeholders για ανίχνευση)
+# ΤΜΗΜΑ Γ: Ιστόγραμμα, Όριο & Ανίχνευση (Histogram, Threshold, Detect)
 # ==========================================================
 
 def histogram(numerators, length, m):
-    raise NotImplementedError
+    max_score = m * length
+    if numerators:
+        max_score = max(max_score, max(numerators))
+    hist = [0] * (max_score + 1)
+    for num in numerators:
+        if 0 <= num < len(hist):
+            hist[num] += 1
+    return hist
 
 def threshold(hist, n_docs, alpha):
-    raise NotImplementedError
+    if n_docs <= 0:
+        return len(hist)
+    tail = sum(hist)
+    for k in range(len(hist)):
+        if (tail / n_docs) <= alpha:
+            return k
+        tail -= hist[k]
+    return len(hist)
 
-def detect(*args, **kwargs):
-    raise NotImplementedError
+def detect(*pos_args, **kwargs):
+    args_obj = pos_args[0] if pos_args else None
+    
+    def get_val(names, default=None):
+        if isinstance(names, str):
+            names = [names]
+        for name in names:
+            if kwargs and name in kwargs:
+                return kwargs[name]
+            if args_obj is not None:
+                if isinstance(args_obj, dict) and name in args_obj:
+                    return args_obj[name]
+                elif hasattr(args_obj, name):
+                    return getattr(args_obj, name)
+        return default
+
+    key = get_val(['key', 'watermark_key'])
+    calibration_source = get_val(['calibration', 'calibrations', 'cal'])
+    documents_source = get_val(['documents', 'document', 'docs'])
+    alpha = get_val(['alpha'], 0.1)
+    window = get_val(['window', 'h'], 4)
+    layers = get_val(['layers', 'm'], 30)
+    bloom_bits = get_val(['bloom_bits', 'bloom', 'bloom_filter', 'nbits'])
+    bloom_k = get_val(['bloom_k', 'k'], 4)
+
+    def load_docs(source):
+        docs = []
+        if source is None:
+            return docs
+        if hasattr(source, 'read'):
+            for line in source:
+                tokens = line.strip().split()
+                if tokens:
+                    docs.append(tokens)
+            return docs
+        if isinstance(source, str):
+            try:
+                with open(source, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        tokens = line.strip().split()
+                        if tokens:
+                            docs.append(tokens)
+                if docs:
+                    return docs
+            except Exception:
+                pass
+            for line in source.strip().splitlines():
+                tokens = line.strip().split()
+                if tokens:
+                    docs.append(tokens)
+            if docs:
+                return docs
+            docs.append(source.strip().split())
+            return docs
+        elif isinstance(source, (list, tuple)):
+            for item in source:
+                if isinstance(item, str):
+                    tokens = item.strip().split()
+                    if tokens:
+                        docs.append(tokens)
+                elif isinstance(item, (list, tuple)):
+                    docs.append(list(item))
+        return docs
+
+    cal_docs = load_docs(calibration_source)
+    cal_numerators = []
+    max_len = 0
+    for doc in cal_docs:
+        max_len = max(max_len, len(doc))
+        if bloom_bits:
+            scorable, _ = bloom_scored_positions(doc, window, bloom_bits, bloom_k)
+            num = 0
+            for t in scorable:
+                ctx = doc[t-window:t]
+                tok = doc[t]
+                for layer in range(layers):
+                    num += g_value(key, ctx, layer, tok)
+            cal_numerators.append(num)
+        else:
+            cal_numerators.append(score_numerator(doc, key, window, layers))
+
+    hist = histogram(cal_numerators, max_len, layers)
+    thresh = threshold(hist, len(cal_docs), alpha)
+
+    eval_docs = load_docs(documents_source)
+    results = []
+    for doc in eval_docs:
+        if bloom_bits:
+            scorable, _ = bloom_scored_positions(doc, window, bloom_bits, bloom_k)
+            num = 0
+            for t in scorable:
+                ctx = doc[t-window:t]
+                tok = doc[t]
+                for layer in range(layers):
+                    num += g_value(key, ctx, layer, tok)
+            mean = num / (layers * len(scorable)) if scorable else 0.0
+        else:
+            num = score_numerator(doc, key, window, layers)
+            mean = mean_score(doc, key, window, layers)
+
+        results.append({
+            "numerator": num,
+            "mean": mean,
+            "watermarked": num >= thresh
+        })
+
+    return {
+        "mode": "detect",
+        "key": key,
+        "alpha": alpha,
+        "threshold": thresh,
+        "histogram": hist,
+        "results": results,
+        "calibration": calibration_source,
+        "bloom": bloom_bits
+    }
 
 if __name__ == "__main__":
     toolkit.run(generate, detect)
+    
