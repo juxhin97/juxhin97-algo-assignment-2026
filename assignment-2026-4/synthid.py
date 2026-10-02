@@ -14,7 +14,7 @@ import hashlib
 import toolkit
 from toolkit import context_item, g_value, bloom_hash_positions
 
-# Ασφαλής μετατροπή δομών σε hashable για αποτροπή TypeError
+# Βοηθητική συνάρτηση για ασφαλή μετατροπή δομών σε hashable
 def make_hashable(obj):
     if isinstance(obj, (list, tuple)):
         return tuple(make_hashable(x) for x in obj)
