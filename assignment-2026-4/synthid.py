@@ -10,11 +10,10 @@ import json
 import math
 import hashlib
 
-# Εισαγωγή των συναρτήσεων από το δοθέν toolkit
 import toolkit
 from toolkit import context_item, g_value, bloom_hash_positions
 
-# Βοηθητική συνάρτηση για ασφαλή μετατροπή δομών σε hashable
+# Helper για να μη σκάει σε unhashable sets/lists
 def make_hashable(obj):
     if isinstance(obj, (list, tuple)):
         return tuple(make_hashable(x) for x in obj)
@@ -29,9 +28,7 @@ def make_hashable(obj):
     except Exception:
         return str(obj)
 
-# ==========================================================
-# ΤΜΗΜΑ Α: Δειγματοληψία (Samplers) & Παραγωγή Κειμένου
-# ==========================================================
+# --- TMHMA A: Samplers & Generation ---
 
 def sample_layered(p, g, m):
     current_p = list(p)
@@ -51,8 +48,9 @@ def sample_layered(p, g, m):
             else:
                 current_p[i] = current_p[i] * (q_A + 1.0)
 
+        # έλεγχος αθροίσματος
         tolerance = max(1e-9, (2 ** m) * 1e-15)
-        assert abs(sum(current_p) - 1.0) < tolerance, "Σφάλμα: Το άθροισμα διαφέρει από το 1"
+        assert abs(sum(current_p) - 1.0) < tolerance, "Error sum"
 
     return current_p
 
@@ -64,6 +62,7 @@ def sample_knockout(p, g, m, rng):
         idx = toolkit.choose(p, rng.random())
         candidates.append(idx)
     
+    # knockout tourney
     for layer in range(m):
         next_round = []
         for i in range(0, len(candidates), 2):
@@ -73,6 +72,7 @@ def sample_knockout(p, g, m, rng):
             g_left = g(left, layer) if callable(g) else g[layer][left]
             g_right = g(right, layer) if callable(g) else g[layer][right]
             
+            # ισοπαλία -> αριστερός κερδίζει
             if g_left >= g_right:
                 next_round.append(left)
             else:
@@ -143,9 +143,7 @@ def generate(*pos_args, **kwargs):
         "tokens": tokens
     }
 
-# ==========================================================
-# ΤΜΗΜΑ Β: Βαθμολόγηση (Scoring) & Φίλτρο Bloom
-# ==========================================================
+# --- TMHMA B: Scoring & Bloom Filter ---
 
 def scored_positions(tokens, h):
     seen = set()
@@ -218,9 +216,7 @@ def bloom_scored_positions(tokens, h, nbits, k):
 
     return scorable, false_skips
 
-# ==========================================================
-# ΤΜΗΜΑ Γ: Ιστόγραμμα, Όριο & Ανίχνευση (Histogram, Threshold, Detect)
-# ==========================================================
+# --- TMHMA C: Detection & Histogram ---
 
 def histogram(numerators, length, m):
     max_score = m * length
